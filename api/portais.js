@@ -196,7 +196,11 @@ module.exports = async (req, res) => {
       fields: {
         TITLE: `Lead Portal | ${codigoImovel} | ${name || "Sem nome"}`,
         NAME: name || "Contato Portal",
-        SOURCE_ID: "WEB",
+        SOURCE_ID: (
+  publicationPlan?.toLowerCase().includes("wim") ? "WIMOVEIS" :
+  publicationPlan?.toLowerCase().includes("imo") ? "IMOVELWEB" :
+  "OTHER"
+),
         PHONE: phones.map((p) => ({ VALUE: p, VALUE_TYPE: "WORK" })),
         EMAIL: email ? [{ VALUE: email, VALUE_TYPE: "WORK" }] : [],
         COMMENTS:
