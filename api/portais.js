@@ -32,63 +32,35 @@ async function bitrixCall(method, params) {
   }
 
   const url = `${BITRIX_WEBHOOK_URL}/${method}`;
+  const resp = await axios.post(url, params, { timeout: 15000 });
 
-  try {
-    const resp = await axios.post(url, params, { timeout: 15000 });
-    return resp.data; // pode conter { result } ou { error, error_description }
-  } catch (err) {
-    console.error("Erro ao chamar Bitrix:", {
-      method,
-      url,
-      status: err.response?.status,
-      data: err.response?.data,
-      message: err.message
-    });
-
-    return {
-      error: "BITRIX_REQUEST_FAILED",
-      details: err.response?.data || err.message
-    };
-  }
+  return resp.data;
 }
 
 async function findDuplicate(phones, email) {
   let duplicates = { PHONE: null, EMAIL: null };
 
-  // TELEFONE
   if (phones && phones.length) {
     try {
       const resultPhone = await bitrixCall("crm.duplicate.findbycomm", {
         type: "PHONE",
-        values: phones
+        values: phones,
       });
-
-      if (!resultPhone.error) {
-        // aqui usamos o `result` da resposta Bitrix
-        duplicates.PHONE = resultPhone.result;
-      } else {
-        console.warn("Erro duplicidade telefone (Bitrix):", resultPhone);
-      }
+      duplicates.PHONE = resultPhone;
     } catch (e) {
-      console.warn("Erro duplicidade telefone (exception):", e.message);
+      console.warn("Erro duplicidade telefone:", e.message);
     }
   }
 
-  // EMAIL
   if (email) {
     try {
       const resultEmail = await bitrixCall("crm.duplicate.findbycomm", {
         type: "EMAIL",
-        values: [email]
+        values: [email],
       });
-
-      if (!resultEmail.error) {
-        duplicates.EMAIL = resultEmail.result;
-      } else {
-        console.warn("Erro duplicidade email (Bitrix):", resultEmail);
-      }
+      duplicates.EMAIL = resultEmail;
     } catch (e) {
-      console.warn("Erro duplicidade email (exception):", e.message);
+      console.warn("Erro duplicidade email:", e.message);
     }
   }
 
@@ -141,7 +113,7 @@ module.exports = async (req, res) => {
       userIdNavplat,
       contactTypeId,
       email,
-      registerDate
+      registerDate,
     } = payload;
 
     if (!name && !email && !phone) {
@@ -158,17 +130,38 @@ module.exports = async (req, res) => {
 
     let leadId = null;
 
-    // DUPLICIDADE → cria atividade
+    // --------------------------------------------------------
+    // DUPLICIDADE → cria atividade no lead existente
+    // --------------------------------------------------------
     if (isDuplicate) {
       const leadFromPhone = duplicates.PHONE?.LEAD?.[0];
       const leadFromEmail = duplicates.EMAIL?.LEAD?.[0];
       leadId = leadFromPhone || leadFromEmail;
 
+      // COMMUNICATIONS exigido pelo Bitrix para crm.activity.add
+      const communications = [];
+
+      if (phones && phones.length) {
+        communications.push(
+          ...phones.map((p) => ({
+            VALUE: p,
+            VALUE_TYPE: "PHONE",
+          }))
+        );
+      }
+
+      if (email) {
+        communications.push({
+          VALUE: email,
+          VALUE_TYPE: "EMAIL",
+        });
+      }
+
       const activityResp = await bitrixCall("crm.activity.add", {
         fields: {
           OWNER_ID: leadId,
-          OWNER_TYPE_ID: 1,
-          TYPE_ID: 4,
+          OWNER_TYPE_ID: 1, // 1 = Lead
+          TYPE_ID: 4, // atividade genérica (pode deixar 4 ou 2 se quiser “ligação”)
           SUBJECT: `Novo contato Portal (duplicado) - ${codigoImovel}`,
           DESCRIPTION:
             `Novo contato vindo do portal.\n\n` +
@@ -176,26 +169,30 @@ module.exports = async (req, res) => {
             `Telefones: ${phones.join(", ")}\n` +
             `E-mail: ${email || "não informado"}`,
           COMPLETED: "N",
-          RESPONSIBLE_ID: 1
-        }
+          RESPONSIBLE_ID: 1,
+          COMMUNICATIONS: communications,
+        },
       });
 
-      if (activityResp.error) {
-        // erro vindo do Bitrix ao criar atividade
+      // Se o Bitrix reclamar de algo, retornamos 400 com detalhes
+      if (activityResp && activityResp.error) {
         return res.status(400).json({
           status: "DUPLICATE_ACTIVITY_ERROR",
-          bitrix: activityResp
+          bitrix: activityResp,
         });
       }
 
       return res.json({
         status: "DUPLICATE_ACTIVITY_CREATED",
-        leadId
+        leadId,
+        bitrix: activityResp,
       });
     }
 
+    // --------------------------------------------------------
     // SEM DUPLICIDADE → cria LEAD novo
-    const resultLead = await bitrixCall("crm.lead.add", {
+    // --------------------------------------------------------
+    const leadResp = await bitrixCall("crm.lead.add", {
       fields: {
         TITLE: `Lead Portal | ${codigoImovel} | ${name || "Sem nome"}`,
         NAME: name || "Contato Portal",
@@ -220,30 +217,27 @@ module.exports = async (req, res) => {
         UF_CONTACT_ID: contactId,
         UF_NAVPLAT_ID: idNavplat,
         UF_CLIENT_CODE: clientCode,
-        UF_PORTAL_ORIGEM: "IMOVELWEB_WIMOVEIS_CASAMINEIRA"
-      }
+        UF_PORTAL_ORIGEM: "IMOVELWEB_WIMOVEIS_CASAMINEIRA",
+      },
     });
 
-    // Se o Bitrix devolver erro, repassamos para o cliente (Postman/Facilita/etc.)
-    if (resultLead.error) {
+    if (leadResp && leadResp.error) {
+      // erro vindo do Bitrix na criação do lead
       return res.status(400).json({
-        status: "BITRIX_LEAD_ERROR",
-        bitrix: resultLead
+        status: "LEAD_CREATE_ERROR",
+        bitrix: leadResp,
       });
     }
 
-    leadId = resultLead.result;
+    leadId = leadResp.result || leadResp; // dependendo de como o Bitrix retornar
 
     return res.json({
       status: "LEAD_CREATED",
-      leadId
+      leadId,
+      bitrix: leadResp,
     });
   } catch (err) {
-    console.error("Erro geral na API /api/portais:", err);
-    return res.status(500).json({
-      error: "INTERNAL_ERROR",
-      message: err.message
-      // se quiser MUITO detalhado: stack: err.stack
-    });
+    console.error("Erro geral:", err.message, err?.response?.data);
+    return res.status(500).json({ error: "INTERNAL_ERROR" });
   }
 };
