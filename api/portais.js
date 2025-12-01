@@ -20,47 +20,75 @@ function extractCodigoImovel(message) {
   return match ? match[1] : null;
 }
 
+/**
+ * Chamada genérica ao Bitrix.
+ * - NÃO lança erro quando o Bitrix retorna { error, error_description }
+ * - Só lança erro em falha de rede/time-out, etc.
+ * - Sempre retorna o objeto inteiro `resp.data`
+ */
 async function bitrixCall(method, params) {
   if (!BITRIX_WEBHOOK_URL) {
     throw new Error("BITRIX_WEBHOOK_URL não definido nas variáveis de ambiente");
   }
 
   const url = `${BITRIX_WEBHOOK_URL}/${method}`;
-  const resp = await axios.post(url, params, { timeout: 15000 });
 
-  if (resp.data.error) {
-    throw new Error(
-      `Bitrix error ${resp.data.error}: ${resp.data.error_description}`
-    );
+  try {
+    const resp = await axios.post(url, params, { timeout: 15000 });
+    return resp.data; // pode conter { result } ou { error, error_description }
+  } catch (err) {
+    console.error("Erro ao chamar Bitrix:", {
+      method,
+      url,
+      status: err.response?.status,
+      data: err.response?.data,
+      message: err.message
+    });
+
+    return {
+      error: "BITRIX_REQUEST_FAILED",
+      details: err.response?.data || err.message
+    };
   }
-
-  return resp.data.result;
 }
 
 async function findDuplicate(phones, email) {
   let duplicates = { PHONE: null, EMAIL: null };
 
+  // TELEFONE
   if (phones && phones.length) {
     try {
       const resultPhone = await bitrixCall("crm.duplicate.findbycomm", {
         type: "PHONE",
         values: phones
       });
-      duplicates.PHONE = resultPhone;
+
+      if (!resultPhone.error) {
+        // aqui usamos o `result` da resposta Bitrix
+        duplicates.PHONE = resultPhone.result;
+      } else {
+        console.warn("Erro duplicidade telefone (Bitrix):", resultPhone);
+      }
     } catch (e) {
-      console.warn("Erro duplicidade telefone:", e.message);
+      console.warn("Erro duplicidade telefone (exception):", e.message);
     }
   }
 
+  // EMAIL
   if (email) {
     try {
       const resultEmail = await bitrixCall("crm.duplicate.findbycomm", {
         type: "EMAIL",
         values: [email]
       });
-      duplicates.EMAIL = resultEmail;
+
+      if (!resultEmail.error) {
+        duplicates.EMAIL = resultEmail.result;
+      } else {
+        console.warn("Erro duplicidade email (Bitrix):", resultEmail);
+      }
     } catch (e) {
-      console.warn("Erro duplicidade email:", e.message);
+      console.warn("Erro duplicidade email (exception):", e.message);
     }
   }
 
@@ -136,7 +164,7 @@ module.exports = async (req, res) => {
       const leadFromEmail = duplicates.EMAIL?.LEAD?.[0];
       leadId = leadFromPhone || leadFromEmail;
 
-      await bitrixCall("crm.activity.add", {
+      const activityResp = await bitrixCall("crm.activity.add", {
         fields: {
           OWNER_ID: leadId,
           OWNER_TYPE_ID: 1,
@@ -151,6 +179,14 @@ module.exports = async (req, res) => {
           RESPONSIBLE_ID: 1
         }
       });
+
+      if (activityResp.error) {
+        // erro vindo do Bitrix ao criar atividade
+        return res.status(400).json({
+          status: "DUPLICATE_ACTIVITY_ERROR",
+          bitrix: activityResp
+        });
+      }
 
       return res.json({
         status: "DUPLICATE_ACTIVITY_CREATED",
@@ -188,14 +224,26 @@ module.exports = async (req, res) => {
       }
     });
 
-    leadId = resultLead;
+    // Se o Bitrix devolver erro, repassamos para o cliente (Postman/Facilita/etc.)
+    if (resultLead.error) {
+      return res.status(400).json({
+        status: "BITRIX_LEAD_ERROR",
+        bitrix: resultLead
+      });
+    }
+
+    leadId = resultLead.result;
 
     return res.json({
       status: "LEAD_CREATED",
       leadId
     });
   } catch (err) {
-    console.error("Erro geral:", err.message);
-    return res.status(500).json({ error: "INTERNAL_ERROR" });
+    console.error("Erro geral na API /api/portais:", err);
+    return res.status(500).json({
+      error: "INTERNAL_ERROR",
+      message: err.message
+      // se quiser MUITO detalhado: stack: err.stack
+    });
   }
 };
