@@ -168,7 +168,7 @@ module.exports = async (req, res) => {
         fields: {
           OWNER_ID: leadId,
           OWNER_TYPE_ID: 1,
-          TYPE_ID: 2,
+          TYPE_ID: 4,
           SUBJECT: `Novo contato Portal (duplicado) - ${codigoImovel}`,
           DESCRIPTION:
             `Novo contato vindo do portal.\n\n` +
