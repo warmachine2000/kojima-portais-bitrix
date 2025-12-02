@@ -219,8 +219,13 @@ module.exports = async (req, res) => {
       status: "LEAD_CREATED",
       leadId,
     });
-  } catch (err) {
+   } catch (err) {
     console.error("Erro geral na função:", err);
-    return res.status(500).json({ error: "INTERNAL_ERROR" });
+
+    return res.status(500).json({
+      error: "INTERNAL_ERROR",
+      message: err.message || null,
+      stack: err.stack || null,
+    });
   }
 };
