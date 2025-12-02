@@ -3,7 +3,7 @@ const axios = require("axios");
 const BITRIX_WEBHOOK_URL = process.env.BITRIX_WEBHOOK_URL;
 const WEBHOOK_TOKEN = process.env.WEBHOOK_TOKEN || null;
 
-// --- Funções auxiliares ---
+// ----------------- Funções auxiliares -----------------
 
 function parsePhones(phoneStr) {
   if (!phoneStr) return [];
@@ -20,12 +20,6 @@ function extractCodigoImovel(message) {
   return match ? match[1] : null;
 }
 
-/**
- * Chamada genérica ao Bitrix.
- * - NÃO lança erro quando o Bitrix retorna { error, error_description }
- * - Só lança erro em falha de rede/time-out, etc.
- * - Sempre retorna o objeto inteiro `resp.data`
- */
 async function bitrixCall(method, params) {
   if (!BITRIX_WEBHOOK_URL) {
     throw new Error("BITRIX_WEBHOOK_URL não definido nas variáveis de ambiente");
@@ -34,7 +28,13 @@ async function bitrixCall(method, params) {
   const url = `${BITRIX_WEBHOOK_URL}/${method}`;
   const resp = await axios.post(url, params, { timeout: 15000 });
 
-  return resp.data;
+  if (resp.data && resp.data.error) {
+    throw new Error(
+      `Bitrix error ${resp.data.error}: ${resp.data.error_description}`
+    );
+  }
+
+  return resp.data.result;
 }
 
 async function findDuplicate(phones, email) {
@@ -79,39 +79,43 @@ function hasLeadDuplicate(duplicates) {
   );
 }
 
-// --- Handler para Vercel ---
+// ----------------- Handler Vercel -----------------
 
 module.exports = async (req, res) => {
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
-  }
-
-   // Validação de token (aceita Authorization: Bearer xxx ou x-webhook-token)
-  if (WEBHOOK_TOKEN) {
-    const authHeader =
-      req.headers["authorization"] || req.headers["Authorization"];
-    const customHeader = req.headers["x-webhook-token"];
-
-    let token = null;
-
-    // 1) Prioriza Authorization: Bearer xxx
-    if (authHeader && authHeader.toLowerCase().startsWith("bearer ")) {
-      token = authHeader.slice(7).trim(); // remove "Bearer "
-    }
-    // 2) Fallback: x-webhook-token simples
-    else if (customHeader) {
-      token = String(customHeader).trim();
-    }
-
-    if (!token || token !== WEBHOOK_TOKEN) {
-      return res.status(401).json({ error: "INVALID_TOKEN" });
-    }
-  }
-
-  const payload = req.body || {};
-  console.log("Payload recebido:", JSON.stringify(payload, null, 2));
-
   try {
+    // Só aceita POST
+    if (req.method !== "POST") {
+      return res.status(405).json({ error: "Method not allowed" });
+    }
+
+    // Validação de token opcional
+    if (WEBHOOK_TOKEN) {
+      const tokenHeader = req.headers["x-webhook-token"];
+      if (tokenHeader !== WEBHOOK_TOKEN) {
+        return res.status(401).json({ error: "INVALID_TOKEN" });
+      }
+    }
+
+    // Parse seguro do body (string ou objeto)
+    let payload = {};
+
+    if (!req.body) {
+      return res.status(400).json({ error: "EMPTY_BODY" });
+    }
+
+    if (typeof req.body === "string") {
+      try {
+        payload = JSON.parse(req.body || "{}");
+      } catch (e) {
+        console.error("Erro ao fazer parse do JSON:", e);
+        return res.status(400).json({ error: "INVALID_JSON" });
+      }
+    } else {
+      payload = req.body;
+    }
+
+    console.log("Payload recebido:", JSON.stringify(payload, null, 2));
+
     const {
       eventId,
       contactId,
@@ -130,25 +134,7 @@ module.exports = async (req, res) => {
       registerDate,
     } = payload;
 
-  try {
-    const {
-      eventId,
-      contactId,
-      messageId,
-      internalReference,
-      eventType,
-      message,
-      idNavplat,
-      phone,
-      clientCode,
-      name,
-      publicationPlan,
-      userIdNavplat,
-      contactTypeId,
-      email,
-      registerDate,
-    } = payload;
-
+    // Pelo menos um identificador básico
     if (!name && !email && !phone) {
       return res
         .status(400)
@@ -158,43 +144,23 @@ module.exports = async (req, res) => {
     const phones = parsePhones(phone);
     const codigoImovel = extractCodigoImovel(message) || "NÃO INFORMADO";
 
+    // Verifica duplicidade
     const duplicates = await findDuplicate(phones, email);
     const isDuplicate = hasLeadDuplicate(duplicates);
 
     let leadId = null;
 
-    // --------------------------------------------------------
-    // DUPLICIDADE → cria atividade no lead existente
-    // --------------------------------------------------------
+    // ----------------- CASO DUPLICADO: cria atividade -----------------
     if (isDuplicate) {
       const leadFromPhone = duplicates.PHONE?.LEAD?.[0];
       const leadFromEmail = duplicates.EMAIL?.LEAD?.[0];
       leadId = leadFromPhone || leadFromEmail;
 
-      // COMMUNICATIONS exigido pelo Bitrix para crm.activity.add
-      const communications = [];
-
-      if (phones && phones.length) {
-        communications.push(
-          ...phones.map((p) => ({
-            VALUE: p,
-            VALUE_TYPE: "PHONE",
-          }))
-        );
-      }
-
-      if (email) {
-        communications.push({
-          VALUE: email,
-          VALUE_TYPE: "EMAIL",
-        });
-      }
-
-      const activityResp = await bitrixCall("crm.activity.add", {
+      await bitrixCall("crm.activity.add", {
         fields: {
           OWNER_ID: leadId,
-          OWNER_TYPE_ID: 1, // 1 = Lead
-          TYPE_ID: 4, // atividade genérica (pode deixar 4 ou 2 se quiser “ligação”)
+          OWNER_TYPE_ID: 1, // Lead
+          TYPE_ID: 4, // chamada (pra ficar mais visível)
           SUBJECT: `Novo contato Portal (duplicado) - ${codigoImovel}`,
           DESCRIPTION:
             `Novo contato vindo do portal.\n\n` +
@@ -203,37 +169,25 @@ module.exports = async (req, res) => {
             `E-mail: ${email || "não informado"}`,
           COMPLETED: "N",
           RESPONSIBLE_ID: 1,
-          COMMUNICATIONS: communications,
         },
       });
-
-      // Se o Bitrix reclamar de algo, retornamos 400 com detalhes
-      if (activityResp && activityResp.error) {
-        return res.status(400).json({
-          status: "DUPLICATE_ACTIVITY_ERROR",
-          bitrix: activityResp,
-        });
-      }
 
       return res.json({
         status: "DUPLICATE_ACTIVITY_CREATED",
         leadId,
-        bitrix: activityResp,
       });
     }
 
-    // --------------------------------------------------------
-    // SEM DUPLICIDADE → cria LEAD novo
-    // --------------------------------------------------------
-    const leadResp = await bitrixCall("crm.lead.add", {
+    // ----------------- CASO NOVO: cria LEAD -----------------
+
+    // Se quiser diferenciar Imovelweb / Wimóveis pela publicationPlan, dá pra brincar aqui
+    const sourceId = "WEB";
+
+    const leadResult = await bitrixCall("crm.lead.add", {
       fields: {
         TITLE: `Lead Portal | ${codigoImovel} | ${name || "Sem nome"}`,
         NAME: name || "Contato Portal",
-        SOURCE_ID: (
-  publicationPlan?.toLowerCase().includes("wim") ? "WIMOVEIS" :
-  publicationPlan?.toLowerCase().includes("imo") ? "IMOVELWEB" :
-  "OTHER"
-),
+        SOURCE_ID: sourceId,
         PHONE: phones.map((p) => ({ VALUE: p, VALUE_TYPE: "WORK" })),
         EMAIL: email ? [{ VALUE: email, VALUE_TYPE: "WORK" }] : [],
         COMMENTS:
@@ -255,26 +209,18 @@ module.exports = async (req, res) => {
         UF_NAVPLAT_ID: idNavplat,
         UF_CLIENT_CODE: clientCode,
         UF_PORTAL_ORIGEM: "IMOVELWEB_WIMOVEIS_CASAMINEIRA",
+        // se quiser depois plugamos aqui o UF_CRM_ORIGIN_URL quando tivermos a URL
       },
     });
 
-    if (leadResp && leadResp.error) {
-      // erro vindo do Bitrix na criação do lead
-      return res.status(400).json({
-        status: "LEAD_CREATE_ERROR",
-        bitrix: leadResp,
-      });
-    }
-
-    leadId = leadResp.result || leadResp; // dependendo de como o Bitrix retornar
+    leadId = leadResult;
 
     return res.json({
       status: "LEAD_CREATED",
       leadId,
-      bitrix: leadResp,
     });
   } catch (err) {
-    console.error("Erro geral:", err.message, err?.response?.data);
+    console.error("Erro geral na função:", err);
     return res.status(500).json({ error: "INTERNAL_ERROR" });
   }
 };
