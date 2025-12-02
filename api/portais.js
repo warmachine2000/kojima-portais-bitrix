@@ -26,16 +26,38 @@ async function bitrixCall(method, params) {
   }
 
   const url = `${BITRIX_WEBHOOK_URL}/${method}`;
-  const resp = await axios.post(url, params, { timeout: 15000 });
 
-  if (resp.data && resp.data.error) {
-    throw new Error(
-      `Bitrix error ${resp.data.error}: ${resp.data.error_description}`
-    );
+  try {
+    const resp = await axios.post(url, params, { timeout: 15000 });
+
+    // Bitrix retornou 200 mas com erro na carga
+    if (resp.data && resp.data.error) {
+      throw new Error(
+        `Bitrix error ${resp.data.error}: ${resp.data.error_description || ""}`
+      );
+    }
+
+    return resp.data.result;
+  } catch (err) {
+    // Aqui pegamos os 400 / 500 que o Axios está jogando
+    if (err.response) {
+      console.error(
+        "Bitrix request FAILED:",
+        err.response.status,
+        JSON.stringify(err.response.data, null, 2)
+      );
+
+      throw new Error(
+        `BITRIX_REQUEST_FAILED (${err.response.status}): ` +
+        JSON.stringify(err.response.data)
+      );
+    }
+
+    // Erro de rede, timeout, etc.
+    throw err;
   }
-
-  return resp.data.result;
 }
+
 
 async function findDuplicate(phones, email) {
   let duplicates = { PHONE: null, EMAIL: null };
