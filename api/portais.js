@@ -86,16 +86,49 @@ module.exports = async (req, res) => {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  // Validação de token opcional
+   // Validação de token (aceita Authorization: Bearer xxx ou x-webhook-token)
   if (WEBHOOK_TOKEN) {
-    const tokenHeader = req.headers["x-webhook-token"];
-    if (tokenHeader !== WEBHOOK_TOKEN) {
+    const authHeader =
+      req.headers["authorization"] || req.headers["Authorization"];
+    const customHeader = req.headers["x-webhook-token"];
+
+    let token = null;
+
+    // 1) Prioriza Authorization: Bearer xxx
+    if (authHeader && authHeader.toLowerCase().startsWith("bearer ")) {
+      token = authHeader.slice(7).trim(); // remove "Bearer "
+    }
+    // 2) Fallback: x-webhook-token simples
+    else if (customHeader) {
+      token = String(customHeader).trim();
+    }
+
+    if (!token || token !== WEBHOOK_TOKEN) {
       return res.status(401).json({ error: "INVALID_TOKEN" });
     }
   }
 
   const payload = req.body || {};
   console.log("Payload recebido:", JSON.stringify(payload, null, 2));
+
+  try {
+    const {
+      eventId,
+      contactId,
+      messageId,
+      internalReference,
+      eventType,
+      message,
+      idNavplat,
+      phone,
+      clientCode,
+      name,
+      publicationPlan,
+      userIdNavplat,
+      contactTypeId,
+      email,
+      registerDate,
+    } = payload;
 
   try {
     const {
