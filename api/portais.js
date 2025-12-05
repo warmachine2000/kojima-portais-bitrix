@@ -1,84 +1,36 @@
-const axios = require("axios");
+// /api/portais.js
+// Handler de TESTE para garantir que a função na Vercel está ok
 
-const BITRIX_WEBHOOK_URL = process.env.BITRIX_WEBHOOK_URL;
-const WEBHOOK_TOKEN = process.env.WEBHOOK_TOKEN || null;
-
-// ----------------- Funções auxiliares -----------------
-
-function parsePhones(phoneStr) {
-  if (!phoneStr) return [];
-  return phoneStr
-    .split(/[\/,;]+/)
-    .map((p) => p.trim())
-    .filter(Boolean);
-}
-
-function extractCodigoImovel(message) {
-  if (!message) return null;
-  const regex = /\((?:Código|Codigo|código)\s+([A-Z0-9\-]+)\)/i;
-  const match = message.match(regex);
-  return match ? match[1] : null;
-}
-
-async function bitrixCall(method, params) {
-  if (!BITRIX_WEBHOOK_URL) {
-    throw new Error("BITRIX_WEBHOOK_URL não definido nas variáveis de ambiente");
-  }
-
-  const url = `${BITRIX_WEBHOOK_URL}/${method}`;
-
+module.exports = async (req, res) => {
   try {
-    const resp = await axios.post(url, params, { timeout: 15000 });
+    console.log("=== TESTE /api/portais ===");
+    console.log("Método:", req.method);
+    console.log("Headers:", req.headers);
+    console.log("Body bruto:", req.body);
 
-    // Bitrix retornou 200 mas com erro lógico
-    if (resp.data && resp.data.error) {
-      throw new Error(
-        `BITRIX_API_ERROR [${method}] ${resp.data.error}: ${
-          resp.data.error_description || ""
-        }`
-      );
+    // Só pra checar se o body veio como string ou objeto
+    let payload = req.body;
+    if (typeof req.body === "string") {
+      try {
+        payload = JSON.parse(req.body);
+      } catch (e) {
+        console.log("Body não é JSON válido, usando string mesmo");
+      }
     }
 
-    return resp.data.result;
+    return res.status(200).json({
+      status: "OK_TEST",
+      message: "Função /api/portais está rodando na Vercel",
+      method: req.method,
+      payload,
+    });
   } catch (err) {
-    if (err.response) {
-      console.error(
-        `Bitrix request FAILED [${method}]`,
-        err.response.status,
-        JSON.stringify(err.response.data, null, 2)
-      );
+    console.error("Erro dentro do handler de teste:", err);
 
-      throw new Error(
-        `BITRIX_REQUEST_FAILED (${err.response.status}) [${method}]: ${JSON.stringify(
-          err.response.data
-        )}`
-      );
-    }
-
-    throw err; // timeout, DNS, rede etc
+    return res.status(500).json({
+      error: "TEST_INTERNAL_ERROR",
+      message: err.message || null,
+    });
   }
-}
+};
 
-async function findDuplicate(phones, email) {
-  let duplicates = { PHONE: null, EMAIL: null };
-
-  if (phones?.length) {
-    try {
-      const resultPhone = await bitrixCall("crm.duplicate.findbycomm", {
-        type: "PHONE",
-        values: phones,
-      });
-      duplicates.PHONE = resultPhone;
-    } catch (e) {
-      console.warn("Erro duplicidade telefone:", e.message);
-    }
-  }
-
-  if (email) {
-    try {
-      const resultEmail = await bitrixCall("crm.duplicate.findbycomm", {
-        type: "EMAIL",
-        values: [email],
-      });
-      duplicates.EMAIL = resultEmail;
-    } catch (e) {
