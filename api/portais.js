@@ -33,7 +33,9 @@ async function bitrixCall(method, params) {
     // Bitrix retornou 200 mas com erro na carga
     if (resp.data && resp.data.error) {
       throw new Error(
-        `Bitrix error ${resp.data.error}: ${resp.data.error_description || ""}`
+        `BITRIX_API_ERROR [${method}] ${resp.data.error}: ${
+          resp.data.error_description || ""
+        }`
       );
     }
 
@@ -42,14 +44,14 @@ async function bitrixCall(method, params) {
     // Aqui pegamos os 400 / 500 que o Axios está jogando
     if (err.response) {
       console.error(
-        "Bitrix request FAILED:",
+        `Bitrix request FAILED [${method}]:`,
         err.response.status,
         JSON.stringify(err.response.data, null, 2)
       );
 
       throw new Error(
-        `BITRIX_REQUEST_FAILED (${err.response.status}): ` +
-        JSON.stringify(err.response.data)
+        `BITRIX_REQUEST_FAILED (${err.response.status}) [${method}]: ` +
+          JSON.stringify(err.response.data)
       );
     }
 
@@ -57,7 +59,6 @@ async function bitrixCall(method, params) {
     throw err;
   }
 }
-
 
 async function findDuplicate(phones, email) {
   let duplicates = { PHONE: null, EMAIL: null };
@@ -178,25 +179,28 @@ module.exports = async (req, res) => {
       const leadFromEmail = duplicates.EMAIL?.LEAD?.[0];
       leadId = leadFromPhone || leadFromEmail;
 
-      await bitrixCall("crm.activity.add", {
-        fields: {
-          OWNER_ID: leadId,
-          OWNER_TYPE_ID: 1, // Lead
-          TYPE_ID: 4, // chamada (pra ficar mais visível)
-          SUBJECT: `Novo contato Portal (duplicado) - ${codigoImovel}`,
-          DESCRIPTION:
-            `Novo contato vindo do portal.\n\n` +
-            `Mensagem: ${message || ""}\n\n` +
-            `Telefones: ${phones.join(", ")}\n` +
-            `E-mail: ${email || "não informado"}`,
-          COMPLETED: "N",
-          RESPONSIBLE_ID: 1,
-        },
-      });
+      // Só tenta criar activity se tiver de fato um leadId
+      if (leadId) {
+        await bitrixCall("crm.activity.add", {
+          fields: {
+            OWNER_ID: leadId,
+            OWNER_TYPE_ID: 1, // Lead
+            TYPE_ID: 4, // chamada (pra ficar mais visível)
+            SUBJECT: `Novo contato Portal (duplicado) - ${codigoImovel}`,
+            DESCRIPTION:
+              `Novo contato vindo do portal.\n\n` +
+              `Mensagem: ${message || ""}\n\n` +
+              `Telefones: ${phones.join(", ") || "não informado"}\n` +
+              `E-mail: ${email || "não informado"}`,
+            COMPLETED: "N",
+            RESPONSIBLE_ID: 1,
+          },
+        });
+      }
 
       return res.json({
         status: "DUPLICATE_ACTIVITY_CREATED",
-        leadId,
+        leadId: leadId || null,
       });
     }
 
@@ -205,34 +209,52 @@ module.exports = async (req, res) => {
     // Se quiser diferenciar Imovelweb / Wimóveis pela publicationPlan, dá pra brincar aqui
     const sourceId = "WEB";
 
+    const leadFields = {
+      TITLE: `Lead Portal | ${codigoImovel} | ${name || "Sem nome"}`,
+      NAME: name || "Contato Portal",
+      SOURCE_ID: sourceId,
+      COMMENTS:
+        `Mensagem original: ${message || ""}\n\n` +
+        `Código do imóvel: ${codigoImovel}\n` +
+        `ClientCode: ${clientCode || ""}\n` +
+        `Navplat: ${idNavplat || ""}\n` +
+        `EventId: ${eventId || ""}\n` +
+        `MessageId: ${messageId || ""}\n` +
+        `InternalReference: ${internalReference || ""}\n` +
+        `PublicationPlan: ${publicationPlan || ""}\n` +
+        `UserIdNavplat: ${userIdNavplat || ""}\n` +
+        `ContactTypeId: ${contactTypeId || ""}\n` +
+        `RegisterDate: ${registerDate || ""}`,
+      UF_CODIGO_IMOVEL: codigoImovel,
+      UF_EVENT_ID: eventId,
+      UF_MESSAGE_ID: messageId,
+      UF_CONTACT_ID: contactId,
+      UF_NAVPLAT_ID: idNavplat,
+      UF_CLIENT_CODE: clientCode,
+      UF_PORTAL_ORIGEM: "IMOVELWEB_WIMOVEIS_CASAMINEIRA",
+      // se quiser depois plugamos aqui o UF_CRM_ORIGIN_URL quando tivermos a URL
+    };
+
+    // Telefones (só manda se tiver)
+    if (phones.length) {
+      leadFields.PHONE = phones.map((p) => ({
+        VALUE: p,
+        VALUE_TYPE: "WORK",
+      }));
+    }
+
+    // E-mail (só manda se tiver)
+    if (email) {
+      leadFields.EMAIL = [
+        {
+          VALUE: email,
+          VALUE_TYPE: "WORK",
+        },
+      ];
+    }
+
     const leadResult = await bitrixCall("crm.lead.add", {
-      fields: {
-        TITLE: `Lead Portal | ${codigoImovel} | ${name || "Sem nome"}`,
-        NAME: name || "Contato Portal",
-        SOURCE_ID: sourceId,
-        PHONE: phones.map((p) => ({ VALUE: p, VALUE_TYPE: "WORK" })),
-        EMAIL: email ? [{ VALUE: email, VALUE_TYPE: "WORK" }] : [],
-        COMMENTS:
-          `Mensagem original: ${message || ""}\n\n` +
-          `Código do imóvel: ${codigoImovel}\n` +
-          `ClientCode: ${clientCode || ""}\n` +
-          `Navplat: ${idNavplat || ""}\n` +
-          `EventId: ${eventId || ""}\n` +
-          `MessageId: ${messageId || ""}\n` +
-          `InternalReference: ${internalReference || ""}\n` +
-          `PublicationPlan: ${publicationPlan || ""}\n` +
-          `UserIdNavplat: ${userIdNavplat || ""}\n` +
-          `ContactTypeId: ${contactTypeId || ""}\n` +
-          `RegisterDate: ${registerDate || ""}`,
-        UF_CODIGO_IMOVEL: codigoImovel,
-        UF_EVENT_ID: eventId,
-        UF_MESSAGE_ID: messageId,
-        UF_CONTACT_ID: contactId,
-        UF_NAVPLAT_ID: idNavplat,
-        UF_CLIENT_CODE: clientCode,
-        UF_PORTAL_ORIGEM: "IMOVELWEB_WIMOVEIS_CASAMINEIRA",
-        // se quiser depois plugamos aqui o UF_CRM_ORIGIN_URL quando tivermos a URL
-      },
+      fields: leadFields,
     });
 
     leadId = leadResult;
@@ -241,7 +263,7 @@ module.exports = async (req, res) => {
       status: "LEAD_CREATED",
       leadId,
     });
-   } catch (err) {
+  } catch (err) {
     console.error("Erro geral na função:", err);
 
     return res.status(500).json({
