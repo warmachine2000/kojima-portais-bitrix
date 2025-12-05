@@ -30,7 +30,7 @@ async function bitrixCall(method, params) {
   try {
     const resp = await axios.post(url, params, { timeout: 15000 });
 
-    // Bitrix retornou 200 mas com erro na carga
+    // Bitrix retornou 200 mas com erro lógico
     if (resp.data && resp.data.error) {
       throw new Error(
         `BITRIX_API_ERROR [${method}] ${resp.data.error}: ${
@@ -41,29 +41,28 @@ async function bitrixCall(method, params) {
 
     return resp.data.result;
   } catch (err) {
-    // Aqui pegamos os 400 / 500 que o Axios está jogando
     if (err.response) {
       console.error(
-        `Bitrix request FAILED [${method}]:`,
+        `Bitrix request FAILED [${method}]`,
         err.response.status,
         JSON.stringify(err.response.data, null, 2)
       );
 
       throw new Error(
-        `BITRIX_REQUEST_FAILED (${err.response.status}) [${method}]: ` +
-          JSON.stringify(err.response.data)
+        `BITRIX_REQUEST_FAILED (${err.response.status}) [${method}]: ${JSON.stringify(
+          err.response.data
+        )}`
       );
     }
 
-    // Erro de rede, timeout, etc.
-    throw err;
+    throw err; // timeout, DNS, rede etc
   }
 }
 
 async function findDuplicate(phones, email) {
   let duplicates = { PHONE: null, EMAIL: null };
 
-  if (phones && phones.length) {
+  if (phones?.length) {
     try {
       const resultPhone = await bitrixCall("crm.duplicate.findbycomm", {
         type: "PHONE",
@@ -83,86 +82,3 @@ async function findDuplicate(phones, email) {
       });
       duplicates.EMAIL = resultEmail;
     } catch (e) {
-      console.warn("Erro duplicidade email:", e.message);
-    }
-  }
-
-  return duplicates;
-}
-
-function hasLeadDuplicate(duplicates) {
-  if (!duplicates) return false;
-
-  const leadIdsPhone = duplicates.PHONE?.LEAD || [];
-  const leadIdsEmail = duplicates.EMAIL?.LEAD || [];
-
-  return (
-    (Array.isArray(leadIdsPhone) && leadIdsPhone.length > 0) ||
-    (Array.isArray(leadIdsEmail) && leadIdsEmail.length > 0)
-  );
-}
-
-// ----------------- Handler Vercel -----------------
-
-module.exports = async (req, res) => {
-  try {
-    // Só aceita POST
-    if (req.method !== "POST") {
-      return res.status(405).json({ error: "Method not allowed" });
-    }
-
-    // Validação de token opcional
-    if (WEBHOOK_TOKEN) {
-      const tokenHeader = req.headers["x-webhook-token"];
-      if (tokenHeader !== WEBHOOK_TOKEN) {
-        return res.status(401).json({ error: "INVALID_TOKEN" });
-      }
-    }
-
-    // Parse seguro do body (string ou objeto)
-    let payload = {};
-
-    if (!req.body) {
-      return res.status(400).json({ error: "EMPTY_BODY" });
-    }
-
-    if (typeof req.body === "string") {
-      try {
-        payload = JSON.parse(req.body || "{}");
-      } catch (e) {
-        console.error("Erro ao fazer parse do JSON:", e);
-        return res.status(400).json({ error: "INVALID_JSON" });
-      }
-    } else {
-      payload = req.body;
-    }
-
-    console.log("Payload recebido:", JSON.stringify(payload, null, 2));
-
-    const {
-      eventId,
-      contactId,
-      messageId,
-      internalReference,
-      eventType,
-      message,
-      idNavplat,
-      phone,
-      clientCode,
-      name,
-      publicationPlan,
-      userIdNavplat,
-      contactTypeId,
-      email,
-      registerDate,
-    } = payload;
-
-    // Pelo menos um identificador básico
-    if (!name && !email && !phone) {
-      return res
-        .status(400)
-        .json({ error: "Precisa de pelo menos nome, e-mail ou telefone" });
-    }
-
-    const phones = parsePhones(phone);
-    const codigo
