@@ -91,4 +91,190 @@ function hasLeadDuplicate(duplicates) {
   if (!duplicates) return false;
 
   const leadIdsPhone = duplicates.PHONE?.LEAD || [];
-  const leadIdsE
+  const leadIdsEmail = duplicates.EMAIL?.LEAD || [];
+
+  return leadIdsPhone.length > 0 || leadIdsEmail.length > 0;
+}
+
+// ----------------- Handler Vercel -----------------
+
+module.exports = async (req, res) => {
+  try {
+    console.log("=== INÍCIO /api/portais ===");
+
+    if (req.method !== "POST") {
+      return res.status(405).json({ error: "Method not allowed" });
+    }
+
+    if (WEBHOOK_TOKEN) {
+      const tokenHeader = req.headers["x-webhook-token"];
+      if (tokenHeader !== WEBHOOK_TOKEN) {
+        return res.status(401).json({ error: "INVALID_TOKEN" });
+      }
+    }
+
+    let payload = {};
+
+    if (!req.body) {
+      return res.status(400).json({ error: "EMPTY_BODY" });
+    }
+
+    if (typeof req.body === "string") {
+      try {
+        payload = JSON.parse(req.body);
+      } catch (e) {
+        return res.status(400).json({ error: "INVALID_JSON" });
+      }
+    } else {
+      payload = req.body;
+    }
+
+    console.log("Payload recebido:", JSON.stringify(payload, null, 2));
+
+    const {
+      eventId,
+      contactId,
+      messageId,
+      internalReference,
+      message,
+      idNavplat,
+      phone,
+      clientCode,
+      name,
+      publicationPlan,
+      userIdNavplat,
+      contactTypeId,
+      email,
+      registerDate,
+    } = payload;
+
+    if (!name && !email && !phone) {
+      return res
+        .status(400)
+        .json({ error: "Precisa de nome, e-mail ou telefone" });
+    }
+
+    const phones = parsePhones(phone);
+    const codigoImovel = extractCodigoImovel(message) || "NÃO INFORMADO";
+
+    const duplicates = await findDuplicate(phones, email);
+    const isDuplicate = hasLeadDuplicate(duplicates);
+
+    let leadId = null;
+
+    // ------------------ DUPLICADO → CRIA ACTIVITY ------------------
+
+    if (isDuplicate) {
+      const leadFromPhone = duplicates.PHONE?.LEAD?.[0];
+      const leadFromEmail = duplicates.EMAIL?.LEAD?.[0];
+
+      leadId = leadFromPhone || leadFromEmail;
+
+      const comms = [];
+
+      if (phones.length) {
+        comms.push({
+          TYPE: "PHONE",
+          VALUE: phones[0],
+          ENTITY_TYPE_ID: 1,
+          ENTITY_ID: leadId,
+        });
+      }
+
+      if (email) {
+        comms.push({
+          TYPE: "EMAIL",
+          VALUE: email,
+          ENTITY_TYPE_ID: 1,
+          ENTITY_ID: leadId,
+        });
+      }
+
+      await bitrixCall("crm.activity.add", {
+        fields: {
+          OWNER_ID: leadId,
+          OWNER_TYPE_ID: 1,
+          TYPE_ID: 4,
+          SUBJECT: `Novo contato Portal (duplicado) - ${codigoImovel}`,
+          DESCRIPTION:
+            `Novo contato vindo do portal.\n\n` +
+            `Mensagem: ${message || ""}\n\n` +
+            `Telefones: ${phones.join(", ") || "não informado"}\n` +
+            `E-mail: ${email || "não informado"}`,
+          RESPONSIBLE_ID: 1,
+          COMPLETED: "N",
+          COMMUNICATIONS: comms,
+        },
+      });
+
+      return res.json({
+        status: "DUPLICATE_ACTIVITY_CREATED",
+        leadId,
+      });
+    }
+
+    // ------------------ NOVO LEAD ------------------
+
+    const leadFields = {
+      TITLE: `Lead Portal | ${codigoImovel} | ${name || "Sem nome"}`,
+      NAME: name || "Contato Portal",
+      SOURCE_ID: "WEB",
+
+      COMMENTS:
+        `Mensagem original: ${message || ""}\n\n` +
+        `Código do imóvel: ${codigoImovel}\n` +
+        `ClientCode: ${clientCode || ""}\n` +
+        `Navplat: ${idNavplat || ""}\n` +
+        `EventId: ${eventId || ""}\n` +
+        `MessageId: ${messageId || ""}\n` +
+        `InternalReference: ${internalReference || ""}\n` +
+        `PublicationPlan: ${publicationPlan || ""}\n` +
+        `UserIdNavplat: ${userIdNavplat || ""}\n` +
+        `ContactTypeId: ${contactTypeId || ""}\n` +
+        `RegisterDate: ${registerDate || ""}`,
+
+      UF_CODIGO_IMOVEL: codigoImovel,
+      UF_EVENT_ID: eventId,
+      UF_MESSAGE_ID: messageId,
+      UF_CONTACT_ID: contactId,
+      UF_NAVPLAT_ID: idNavplat,
+      UF_CLIENT_CODE: clientCode,
+      UF_PORTAL_ORIGEM: "IMOVELWEB_WIMOVEIS_CASAMINEIRA",
+    };
+
+    if (phones.length) {
+      leadFields.PHONE = phones.map((p) => ({
+        VALUE: p,
+        VALUE_TYPE: "WORK",
+      }));
+    }
+
+    if (email) {
+      leadFields.EMAIL = [
+        {
+          VALUE: email,
+          VALUE_TYPE: "WORK",
+        },
+      ];
+    }
+
+    const leadResult = await bitrixCall("crm.lead.add", {
+      fields: leadFields,
+    });
+
+    leadId = leadResult;
+
+    return res.json({
+      status: "LEAD_CREATED",
+      leadId,
+    });
+  } catch (err) {
+    console.error("ERRO GERAL /api/portais:", err);
+
+    return res.status(500).json({
+      error: "INTERNAL_ERROR",
+      message: err.message,
+    });
+  }
+};
+
